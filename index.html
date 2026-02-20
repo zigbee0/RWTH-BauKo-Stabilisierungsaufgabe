@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
-    <title>Tragwerks-Stabilisator (v22: 3D Labels & Raster)</title>
+    <title>Tragwerks-Stabilisator</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <style>
@@ -41,7 +41,7 @@
         
         svg { border: 1px solid #ccc; background: white; user-select: none; }
         
-        /* 2D Knoten-Stil (Verkleinert: r=4) */
+        /* 2D Knoten-Stil */
         circle.node { fill: #fff; stroke: #333; stroke-width: 1.5px; cursor: pointer; transition: 0.2s; }
         circle.node:hover { fill: #aaa; r: 6; } 
         circle.node.selected { fill: #ff0000; stroke: #ff0000; r: 5; }
@@ -95,16 +95,35 @@
     let userBraces = []; 
     let nodeList = []; 
     let selectedNode = null; 
-    let elementMeshes = [];
     let perfValue = 0;
 
     const frameGroup = new THREE.Group();
     const userBraceGroup = new THREE.Group();
     const solutionBraceGroup = new THREE.Group();
-    const labelGroup = new THREE.Group(); // Gruppe für Labels
+    const labelGroup = new THREE.Group();
 
     init3D();
     generateNewProblem();
+
+    // --- Helper: WebGL Memory Leak Prevention ---
+    function disposeGroup(group) {
+        while (group.children.length > 0) {
+            const child = group.children[0];
+            group.remove(child);
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) {
+                if (Array.isArray(child.material)) {
+                    child.material.forEach(mat => {
+                        if (mat.map) mat.map.dispose();
+                        mat.dispose();
+                    });
+                } else {
+                    if (child.material.map) child.material.map.dispose();
+                    child.material.dispose();
+                }
+            }
+        }
+    }
 
     // --- 1. 3D Umgebung Initialisierung ---
     function init3D() {
@@ -150,7 +169,7 @@
     function createLabel(text, x, y, z, color='#333', size=1.5) {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        canvas.width = 256; canvas.height = 64; // Breite erhöht für längere Texte
+        canvas.width = 256; canvas.height = 64; 
         ctx.font = 'Bold 32px Arial';
         ctx.fillStyle = color;
         ctx.textAlign = 'center';
@@ -167,7 +186,7 @@
 
     // --- Raster und Labels zeichnen ---
     function drawGridAndLabels(s) {
-        labelGroup.clear();
+        disposeGroup(labelGroup); // Fix: Memory Leak
         
         const lineMat = new THREE.LineBasicMaterial({ color: 0xcccccc });
         const pts = [];
@@ -176,7 +195,6 @@
         for(let z=0; z<=s.zBays; z++) {
             pts.push(new THREE.Vector3(0, 0, z*s.baySize));
             pts.push(new THREE.Vector3(s.xBays*s.baySize, 0, z*s.baySize));
-            // Label
             const label = createLabel(`Reihe ${z+1}`, -4, 0, z*s.baySize);
             labelGroup.add(label);
         }
@@ -186,7 +204,6 @@
         for(let x=0; x<=s.xBays; x++) {
             pts.push(new THREE.Vector3(x*s.baySize, 0, 0));
             pts.push(new THREE.Vector3(x*s.baySize, 0, s.zBays*s.baySize));
-            // Label
             const label = createLabel(`Reihe ${abc[x]}`, x*s.baySize, 0, s.zBays*s.baySize + 2);
             labelGroup.add(label);
         }
@@ -292,11 +309,9 @@
 
     // --- 3. 3D-Darstellung ---
     function drawStructure3DComplex() {
-        frameGroup.clear();
-        elementMeshes = [];
+        disposeGroup(frameGroup); // Fix: Memory Leak
         const s = structureData;
         
-        // Raster und Labels zeichnen
         drawGridAndLabels(s);
 
         const frameMat = new THREE.MeshLambertMaterial({ color: 0x444444 });
@@ -305,7 +320,6 @@
         for(let n of nodeList) {
             const px=n.x*s.baySize, py=n.y*s.heightSize, pz=n.z*s.baySize;
             
-            // Knotengröße reduziert (0.12)
             const nm = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), nodeMat);
             nm.position.set(px,py,pz); frameGroup.add(nm);
 
@@ -313,11 +327,10 @@
                 const v1 = new THREE.Vector3(px, py, pz);
                 const v2 = new THREE.Vector3(tx, ty, tz);
                 const dist = v1.distanceTo(v2);
-                const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, dist, 8), frameMat.clone());
+                const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, dist, 8), frameMat);
                 cyl.position.copy(v1).add(v2).multiplyScalar(0.5);
                 cyl.lookAt(v2); cyl.rotateX(Math.PI/2);
                 frameGroup.add(cyl);
-                elementMeshes.push(cyl); 
             };
 
             if(n.y>0 && isNodeValid(n.x, n.y-1, n.z)) drawBeam(n.x*s.baySize, (n.y-1)*s.heightSize, n.z*s.baySize);
@@ -398,7 +411,7 @@
     }
 
     function clearSolution() {
-        solutionBraceGroup.clear();
+        disposeGroup(solutionBraceGroup); // Fix: Memory Leak
         document.querySelectorAll('line.solution-brace').forEach(e => e.remove());
     }
 
@@ -604,13 +617,17 @@
     function removeBrace(braceData) {
         userBraces = userBraces.filter(b => b !== braceData);
         if(braceData.svg) braceData.svg.remove();
-        if(braceData.mesh) userBraceGroup.remove(braceData.mesh);
+        if(braceData.mesh) {
+            userBraceGroup.remove(braceData.mesh);
+            if(braceData.mesh.geometry) braceData.mesh.geometry.dispose();
+            if(braceData.mesh.material) braceData.mesh.material.dispose();
+        }
         document.getElementById('status-bar').innerText = "Stab entfernt.";
     }
 
     function resetUserBraces() {
         userBraces = []; 
-        userBraceGroup.clear();
+        disposeGroup(userBraceGroup); // Fix: Memory Leak
         clearSolution();
         
         selectedNode = null;
