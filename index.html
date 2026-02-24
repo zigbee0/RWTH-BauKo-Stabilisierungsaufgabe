@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
-    <title>Tragwerks-Stabilisator</title>
+    <title>Tragwerks-Stabilisator (v22.1: Optimized)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <style>
@@ -186,7 +186,7 @@
 
     // --- Raster und Labels zeichnen ---
     function drawGridAndLabels(s) {
-        disposeGroup(labelGroup); // Fix: Memory Leak
+        disposeGroup(labelGroup);
         
         const lineMat = new THREE.LineBasicMaterial({ color: 0xcccccc });
         const pts = [];
@@ -223,7 +223,7 @@
             
             const xBaysMax = Math.floor(Math.random()*2) + 3; 
             const zBaysMax = Math.floor(Math.random()*2) + 2; 
-            const maxLevel = Math.floor(Math.random()*2) + 2; 
+            const maxLevel = Math.floor(Math.random()*2) + 3; 
             
             let gridHeights = [];
             for(let x=0; x<xBaysMax; x++) {
@@ -346,7 +346,7 @@
         controls.target.set((s.xBays*s.baySize)/2, (s.maxLevel*s.heightSize)/2, (s.zBays*s.baySize)/2);
     }
 
-    // --- 4. Musterlösung (L-Regel) ---
+// --- 4. Musterlösung (L-Regel) ---
     function showSolution() {
         clearSolution(); 
         const mode = document.getElementById('modeSelect').value;
@@ -375,28 +375,15 @@
 
         if (mode === 'scheiben') {
             for(let y=1; y<=s.maxLevel; y++) {
-                let zBackbone = -1;
                 for(let z=0; z<s.zBays; z++) {
-                    let hasFloor = false;
-                    for(let x=0; x<s.xBays; x++) if(s.gridHeights[x][z] >= y) hasFloor = true;
-                    if(hasFloor) { zBackbone = z; break; }
-                }
-                let xBackbone = -1;
-                for(let x=0; x<s.xBays; x++) {
-                    let hasFloor = false;
-                    for(let z=0; z<s.zBays; z++) if(s.gridHeights[x][z] >= y) hasFloor = true;
-                    if(hasFloor) { xBackbone = x; break; }
-                }
-                if(zBackbone !== -1) {
-                    for(let x=0; x<s.xBays; x++) if(s.gridHeights[x][zBackbone] >= y) addSol(x, y, zBackbone, x+1, y, zBackbone+1);
-                }
-                if(xBackbone !== -1) {
-                    for(let z=0; z<s.zBays; z++) {
-                        if(s.gridHeights[xBackbone][z] >= y) {
-                            if(z !== zBackbone) addSol(xBackbone, y, z, xBackbone+1, y, z+1);
+                    for(let x=0; x<s.xBays; x++) {
+                        if (isNodeValid(x,y,z) && isNodeValid(x+1,y,z) && isNodeValid(x,y,z+1) && isNodeValid(x+1,y,z+1)) {
+                            if ((x+z)%2 === 0) addSol(x, y, z, x+1, y, z+1);
+                            else addSol(x+1, y, z, x, y, z+1);
                         }
                     }
                 }
+                
                 let foundBack = false; for(let z=0; z<s.zBays; z++) { for(let x=0; x<s.xBays; x++) { if(getBayHeight(x,z)>=y) { addSol(x, y, z, x+1, y-1, z); foundBack=true; break; } } if(foundBack) break; }
                 let foundFront = false; for(let z=s.zBays-1; z>=0; z--) { for(let x=s.xBays-1; x>=0; x--) { if(getBayHeight(x,z)>=y) { addSol(x, y, z+1, x+1, y-1, z+1); foundFront=true; break; } } if(foundFront) break; }
                 let foundSide = false; for(let x=0; x<s.xBays; x++) { for(let z=0; z<s.zBays; z++) { if(getBayHeight(x,z)>=y) { addSol(x, y, z, x, y-1, z+1); foundSide=true; break; } } if(foundSide) break; }
@@ -407,17 +394,73 @@
                 for(let x=0; x<=s.xBays; x++) for(let z=0; z<s.zBays; z++) if(isNodeValid(x,y,z)&&isNodeValid(x,y,z+1)) { addSol(x,y,z, x,y-1,z+1); break; }
             }
         }
-        document.getElementById('status-bar').innerText = "Musterlösung (L-Regel) wird angezeigt.";
+        document.getElementById('status-bar').innerText = "Musterlösung wird angezeigt.";
     }
-
-    function clearSolution() {
-        disposeGroup(solutionBraceGroup); // Fix: Memory Leak
-        document.querySelectorAll('line.solution-brace').forEach(e => e.remove());
-    }
-
-    // --- 5. Statische Berechnung ---
+	
+// --- 5. Statische Berechnung & Konzeptprüfung ---
     function analyzeStructure() {
+        const mode = document.getElementById('modeSelect').value;
+        const sb = document.getElementById('status-bar');
         const s = structureData;
+
+        sb.style.opacity = '0.5';
+        setTimeout(() => sb.style.opacity = '1', 100);
+
+        // --- 1. Konzeptuelle Prüfungen ---
+        let conceptualError = null;
+
+        if (mode === 'scheiben') {
+            for (let y = 1; y <= s.maxLevel; y++) {
+                let hasNodes = nodeList.some(n => n.y === y);
+                if (hasNodes) {
+                    let bracesInFloor = userBraces.filter(b => b.p1.y === y && b.p2.y === y).length;
+                    
+                    if (bracesInFloor === 0) {
+                        conceptualError = `Fehler (Scheibenstabilisierung): Decke Ebene ${y} ist schubweich! (Es fehlen horizontale Verbände)`;
+                        break;
+                    }
+                }
+            }
+        } 
+        else if (mode === 'reihen') {
+            let hasFloorBraces = userBraces.some(b => b.p1.y === b.p2.y);
+            
+            if (hasFloorBraces) {
+                conceptualError = `Fehler (Reihenstabilisierung): Decke muss schubweich sein! (Bitte horizontale Verbände entfernen)`;
+            } else {
+                for (let y = 1; y <= s.maxLevel; y++) {
+                    for (let z = 0; z <= s.zBays; z++) {
+                        let hasWall = false;
+                        for (let x = 0; x <= s.xBays; x++) { if (isNodeValid(x, y, z) && isNodeValid(x, y - 1, z)) { hasWall = true; break; } }
+                        if (hasWall) {
+                            let hasBrace = userBraces.some(b => b.p1.z === z && b.p2.z === z && ((b.p1.y === y && b.p2.y === y - 1) || (b.p1.y === y - 1 && b.p2.y === y)));
+                            if (!hasBrace) { conceptualError = `Fehler (Reihenstabilisierung): In Reihe ${z + 1} fehlt im Geschoss Ebene ${y} ein Verband!`; break; }
+                        }
+                    }
+                    if (conceptualError) break;
+
+                    const abc = "ABCDEFGHIJ";
+                    for (let x = 0; x <= s.xBays; x++) {
+                        let hasWall = false;
+                        for (let z = 0; z <= s.zBays; z++) { if (isNodeValid(x, y, z) && isNodeValid(x, y - 1, z)) { hasWall = true; break; } }
+                        if (hasWall) {
+                            let hasBrace = userBraces.some(b => b.p1.x === x && b.p2.x === x && ((b.p1.y === y && b.p2.y === y - 1) || (b.p1.y === y - 1 && b.p2.y === y)));
+                            if (!hasBrace) { conceptualError = `Fehler (Reihenstabilisierung): In Reihe ${abc[x]} fehlt im Geschoss Ebene ${y} ein Verband!`; break; }
+                        }
+                    }
+                    if (conceptualError) break;
+                }
+            }
+        }
+
+        if (conceptualError) {
+            sb.innerText = conceptualError;
+            sb.style.background = "#f8d7da";
+            sb.style.color = "#721c24";
+            return; 
+        }
+
+        // --- 2. Statische Berechnung (FEM) ausführen ---
         const nNodes = nodeList.length;
         const nDOF = nNodes * 3; 
         
@@ -466,24 +509,22 @@
         for(let n of nodeList) { if(n.y > 0 && n.y === getBayHeight(n.x, n.z)) { F[n.id*3] = 20; F[n.id*3 + 2] = 10; } }
 
         let u = solveLinearSystem(K, F, nDOF);
-        const sb = document.getElementById('status-bar');
         
         if(u === null) {
-            sb.innerText = "❌ Einsturzgefahr! (Strukturell instabil / Singular Matrix)";
+            sb.innerText = "Einsturzgefahr! (Strukturell instabil / Singular Matrix)";
             sb.style.background = "#f8d7da"; sb.style.color = "#721c24";
         } else {
             let maxDisp = 0; for(let val of u) maxDisp = Math.max(maxDisp, Math.abs(val));
             if(maxDisp > 1e4) {
-                sb.innerText = `❌ Einsturzgefahr! (Zu große Verformung: ${maxDisp.toExponential(2)})`;
+                sb.innerText = `Einsturzgefahr! (Zu große Verformung: ${maxDisp.toExponential(2)})`;
                 sb.style.background = "#f8d7da"; sb.style.color = "#721c24";
             } else {
-                sb.innerText = `✅ Strukturell stabil! (Max. Verformung: ${maxDisp.toFixed(4)})`;
+                sb.innerText = `System korrekt & stabil!`;
                 sb.style.background = "#d1e7dd"; sb.style.color = "#0f5132";
             }
         }
-    }
-
-    function solveLinearSystem(A, b, n) {
+    }	
+	function solveLinearSystem(A, b, n) {
         let M = new Float64Array(A); let x = new Float64Array(b);
         for(let k=0; k<n; k++) {
             let maxVal = Math.abs(M[k*n + k]), maxRow = k;
@@ -503,7 +544,7 @@
         }
         return x;
     }
-
+	
     // --- 6. 2D-Paneele erstellen ---
     function create2DPanelsComplex() {
         const c = document.getElementById('draw-area');
