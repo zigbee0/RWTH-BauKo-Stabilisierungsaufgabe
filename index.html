@@ -21,28 +21,30 @@
         #toolbar { padding: 10px 20px; background: #e9ecef; border-bottom: 1px solid #ccc; display: flex; justify-content: space-between; align-items: center; }
         select { padding: 8px; border-radius: 4px; border: 1px solid #aaa; font-weight: bold; }
         button { padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; color: white; margin-left: 5px; font-weight: bold; transition: 0.2s; font-size: 13px; }
-        .btn-new { background: #6c757d; } 
-        .btn-check { background: #6610f2; color: white; } 
-        .btn-solve { background: #28a745; } 
+        .btn-new { background: #6c757d; }
+        .btn-check { background: #6610f2; color: white; }
+        .btn-solve { background: #28a745; }
         .btn-reset { background: #dc3545; }
         button:hover { transform: translateY(-1px); opacity: 0.9; }
 
         #status-bar { padding: 12px 20px; background: #fff3cd; color: #333; font-size: 14px; border-bottom: 1px solid #ffeeba; min-height: 20px; font-weight: bold;}
         #draw-area { flex: 1; overflow-y: auto; padding: 20px; }
-        
+
         .panel-group { margin-bottom: 25px; border: 1px solid #eee; border-radius: 8px; padding: 15px; background: #fff; }
         .panel-title { font-weight: bold; display: block; margin-bottom: 10px; color: #444; border-bottom: 2px solid #eee; padding-bottom: 5px; }
         .svg-container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
         .svg-wrapper { text-align: center; }
         svg { border: 1px solid #ccc; background: white; user-select: none; }
-        
+
         circle.node { fill: #fff; stroke: #333; stroke-width: 1.5px; cursor: pointer; transition: 0.2s; }
-        circle.node:hover { fill: #aaa; r: 6; } 
+        circle.node:hover { fill: #aaa; r: 6; }
         circle.node.selected { fill: #ff0000; stroke: #ff0000; r: 5; }
-        circle.node.ground { fill: #bbb; stroke: #888; cursor: pointer; } 
+        circle.node.ground { fill: #bbb; stroke: #888; cursor: pointer; }
+        rect.field { fill: #eef4fb; pointer-events: none; }
         line.frame { stroke: #e0e0e0; stroke-width: 2px; }
         line.brace { stroke: #dc3545; stroke-width: 4px; stroke-linecap: round; cursor: pointer; transition: stroke 0.2s; }
         line.brace:hover { stroke: #ff0000; stroke-width: 6px; }
+        line.brace.redundant { stroke: #fd7e14; }
         line.solution-brace { stroke: #198754; stroke-width: 3px; stroke-dasharray: 5,5; opacity: 0.8; pointer-events: none; }
     </style>
 </head>
@@ -59,8 +61,10 @@
             </div>
             <div class="formula-desc">
                 • <strong>k (Knoten):</strong> <span id="k-val">0</span> (Anz. Knoten ohne Auflagerknoten)<br>
-                • <strong>p<sub>vorh</sub> (Stäbe):</strong> <span id="pvorh-val">0</span> 
-                (Anzahl Stäbe inkl. Stützen am Boden)
+                • <strong>p<sub>vorh</sub> (Stäbe):</strong> <span id="pvorh-val">0</span>
+                (Anzahl Stäbe inkl. Stützen am Boden)<br>
+                • <strong>Hinweis:</strong> p = p<sub>erf</sub> ist nur notwendig, nicht hinreichend –
+                geprüft wird zusätzlich die kinematische Unverschieblichkeit.
             </div>
         </div>
     </div>
@@ -77,7 +81,7 @@
             <button class="btn-check" onclick="analyzeStructure()">System prüfen</button>
         </div>
     </div>
-    
+
     <div id="status-bar">Bereit.</div>
     <div id="draw-area"></div>
 </div>
@@ -85,10 +89,14 @@
 <script>
     let scene, camera, renderer, controls;
     let structureData = {};
-    let userBraces = []; 
-    let nodeList = []; 
-    let selectedNode = null; 
+    let userBraces = [];
+    let nodeList = [];
+    let nodeMap = new Map();
+    let frameBars = [];   // Stützen und Riegel des Gelenkstabwerks: [Knoten a, Knoten b]
+    let freeDofCount = 0; // 3 Verschiebungsfreiheitsgrade je Knoten oberhalb der Auflager
+    let selectedNode = null;
     let perfValue = 0;
+    const ABC = "ABCDEFGHIJ";
 
     const frameGroup = new THREE.Group();
     const userBraceGroup = new THREE.Group();
@@ -103,6 +111,7 @@
         while (group.children.length > 0) {
             const child = group.children[0];
             group.remove(child);
+            if (child.children && child.children.length > 0) disposeGroup(child);
             if (child.geometry) child.geometry.dispose();
             if (child.material) {
                 if (Array.isArray(child.material)) child.material.forEach(mat => { if(mat.map) mat.map.dispose(); mat.dispose(); });
@@ -116,9 +125,9 @@
         scene = new THREE.Scene();
         scene.background = new THREE.Color(0xeef2f5);
         const aspect = container.clientWidth / container.clientHeight;
-        const d = 40; 
+        const d = 40;
         camera = new THREE.OrthographicCamera(-d*aspect, d*aspect, d, -d, 1, 1000);
-        camera.position.set(50, 50, 50); 
+        camera.position.set(50, 50, 50);
         camera.lookAt(scene.position);
         renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(container.clientWidth, container.clientHeight);
@@ -130,13 +139,13 @@
         const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
         dirLight.position.set(20, 50, 20);
         scene.add(dirLight);
-        
+
         scene.add(frameGroup);
         scene.add(userBraceGroup);
         scene.add(solutionBraceGroup);
         scene.add(labelGroup);
         scene.add(torsionArrowGroup); // Pfeil-Gruppe zur Szene hinzufügen
-        
+
         animate();
         window.addEventListener('resize', () => {
             const aspect = container.clientWidth / container.clientHeight;
@@ -150,7 +159,7 @@
     function createLabel(text, x, y, z, color='#333', size=1.5) {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        canvas.width = 256; canvas.height = 64; 
+        canvas.width = 256; canvas.height = 64;
         ctx.font = 'Bold 32px Arial'; ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText(text, 128, 32);
         const tex = new THREE.CanvasTexture(canvas);
@@ -158,6 +167,15 @@
         const sprite = new THREE.Sprite(mat);
         sprite.position.set(x, y, z); sprite.scale.set(size*4, size, 1);
         return sprite;
+    }
+
+    function toWorld(p) { const s = structureData; return new THREE.Vector3(p.x*s.baySize, p.y*s.heightSize, p.z*s.baySize); }
+
+    function makeRod(p1, p2, radius, material) {
+        const v1 = toWorld(p1), v2 = toWorld(p2);
+        const cyl = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, v1.distanceTo(v2), 8), material);
+        cyl.position.copy(v1).add(v2).multiplyScalar(0.5); cyl.lookAt(v2); cyl.rotateX(Math.PI/2);
+        return cyl;
     }
 
     function drawGridAndLabels(s) {
@@ -168,10 +186,9 @@
             pts.push(new THREE.Vector3(0, 0, z*s.baySize)); pts.push(new THREE.Vector3(s.xBays*s.baySize, 0, z*s.baySize));
             labelGroup.add(createLabel(`Reihe ${z+1}`, -4, 0, z*s.baySize));
         }
-        const abc = "ABCDEFGHIJ";
         for(let x=0; x<=s.xBays; x++) {
             pts.push(new THREE.Vector3(x*s.baySize, 0, 0)); pts.push(new THREE.Vector3(x*s.baySize, 0, s.zBays*s.baySize));
-            labelGroup.add(createLabel(`Reihe ${abc[x]}`, x*s.baySize, 0, s.zBays*s.baySize + 2));
+            labelGroup.add(createLabel(`Reihe ${ABC[x]}`, x*s.baySize, 0, s.zBays*s.baySize + 2));
         }
         labelGroup.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
         for(let y=1; y<=s.maxLevel; y++) labelGroup.add(createLabel(`Ebene ${y}`, -4, y*s.heightSize, -2, '#0056b3'));
@@ -180,26 +197,48 @@
     function generateNewProblem() {
         try {
             resetUserBraces();
-            const xBaysMax = Math.floor(Math.random()*2) + 2; 
-            const zBaysMax = Math.floor(Math.random()*2) + 2; 
-            const maxLevel = Math.floor(Math.random()*2) + 3; 
-            
-            let gridHeights = [];
-            for(let x=0; x<xBaysMax; x++) {
-                let row = [];
-                for(let z=0; z<zBaysMax; z++) {
-                    let h = maxLevel;
-                    if(Math.random() > 0.5) h -= 3;
-                    if(x===0 && z===0) h = maxLevel; 
-                    row.push(Math.max(0, h));
+            let xBaysMax, zBaysMax, maxLevel, gridHeights;
+            // Nur Grundrisse, deren Felder in jeder Ebene über Kanten zusammenhängen. Sonst zerfällt eine
+            // Decke in Teilscheiben, die nur über einen Eckknoten gekoppelt sind (kein Übungsfall der Vorlesung).
+            do {
+                xBaysMax = Math.floor(Math.random()*2) + 2;
+                zBaysMax = Math.floor(Math.random()*2) + 2;
+                maxLevel = Math.floor(Math.random()*2) + 3;
+                gridHeights = [];
+                for(let x=0; x<xBaysMax; x++) {
+                    let row = [];
+                    for(let z=0; z<zBaysMax; z++) {
+                        let h = maxLevel;
+                        if(Math.random() > 0.5) h -= 3;
+                        if(x===0 && z===0) h = maxLevel;
+                        row.push(Math.max(0, h));
+                    }
+                    gridHeights.push(row);
                 }
-                gridHeights.push(row);
-            }
+            } while (!isFloorPlanConnected(gridHeights, xBaysMax, zBaysMax, maxLevel));
 
             structureData = { xBays: xBaysMax, zBays: zBaysMax, maxLevel, gridHeights, baySize: 4, heightSize: 3 };
             indexNodes(); calculatePerf(); drawStructure3DComplex(); create2DPanelsComplex();
             setStatus("Ein neues System wurde generiert.", "#fff3cd", "#333");
         } catch (e) { console.error(e); }
+    }
+
+    function isFloorPlanConnected(g, xB, zB, maxLevel) {
+        for (let y = 1; y <= maxLevel; y++) {
+            const inFloor = (x, z) => x >= 0 && x < xB && z >= 0 && z < zB && g[x][z] >= y;
+            let total = 0;
+            for (let x = 0; x < xB; x++) for (let z = 0; z < zB; z++) if (inFloor(x, z)) total++;
+            const seen = new Set(['0,0']); const stack = [[0, 0]];
+            while (stack.length > 0) {
+                const [x, z] = stack.pop();
+                for (const [nx, nz] of [[x+1, z], [x-1, z], [x, z+1], [x, z-1]]) {
+                    const key = nx + ',' + nz;
+                    if (inFloor(nx, nz) && !seen.has(key)) { seen.add(key); stack.push([nx, nz]); }
+                }
+            }
+            if (seen.size !== total) return false;
+        }
+        return true;
     }
 
     function setStatus(text, bg, color) {
@@ -221,29 +260,45 @@
         }
     }
 
+    // Riegel und Felder werden über die angrenzenden Felder definiert (nicht über die Endknoten),
+    // damit über einem nicht vorhandenen Feld kein Riegel entsteht.
+    // Riegel in X-Richtung von (x,y,z) nach (x+1,y,z)
+    function hasBeamX(x, y, z) { return y >= 1 && (getBayHeight(x, z) >= y || getBayHeight(x, z-1) >= y); }
+    // Riegel in Z-Richtung von (x,y,z) nach (x,y,z+1)
+    function hasBeamZ(x, y, z) { return y >= 1 && (getBayHeight(x, z) >= y || getBayHeight(x-1, z) >= y); }
+    // Deckenfeld (x..x+1, z..z+1) auf Ebene y
+    function hasFloorField(x, y, z) { return y >= 1 && getBayHeight(x, z) >= y; }
+
+    function nodeKey(x, y, z) { return x + ',' + y + ',' + z; }
+    function getNode(x, y, z) { return nodeMap.get(nodeKey(x, y, z)); }
+
     function indexNodes() {
-        nodeList = [];
+        nodeList = []; nodeMap = new Map(); frameBars = [];
         const s = structureData;
         for(let y=0; y<=s.maxLevel; y++) {
             for(let z=0; z<=s.zBays; z++) {
                 for(let x=0; x<=s.xBays; x++) {
-                    if(isNodeValid(x,y,z)) nodeList.push({ x, y, z, id: nodeList.length });
+                    if(isNodeValid(x,y,z)) {
+                        const n = { x, y, z, id: nodeList.length };
+                        nodeList.push(n); nodeMap.set(nodeKey(x, y, z), n);
+                    }
                 }
             }
+        }
+        // Auflagerknoten sind unverschieblich gelagert (a = 3) und haben keine Freiheitsgrade
+        freeDofCount = 0;
+        for (const n of nodeList) { n.dof = n.y > 0 ? freeDofCount : -1; if (n.y > 0) freeDofCount += 3; }
+        for (const n of nodeList) {
+            if (n.y === 0) continue;
+            frameBars.push([n, getNode(n.x, n.y-1, n.z)]); // Stütze (jeder Knoten über y=0 steht auf einer)
+            if (hasBeamX(n.x, n.y, n.z)) frameBars.push([n, getNode(n.x+1, n.y, n.z)]);
+            if (hasBeamZ(n.x, n.y, n.z)) frameBars.push([n, getNode(n.x, n.y, n.z+1)]);
         }
     }
 
     function calculatePerf() {
-        const s = structureData;
-        let k = 0; let bars = 0;
-        for(let n of nodeList) {
-            if(n.y > 0) k++;
-            if(n.y > 0 && isNodeValid(n.x, n.y-1, n.z)) bars++; 
-            if(n.y > 0) {
-                if(isNodeValid(n.x+1, n.y, n.z)) bars++; 
-                if(isNodeValid(n.x, n.y, n.z+1)) bars++; 
-            }
-        }
+        const k = nodeList.filter(n => n.y > 0).length;
+        const bars = frameBars.length;
         perfValue = 3 * k - bars;
         document.getElementById('perf-val').innerText = perfValue;
         document.getElementById('k-val').innerText = k;
@@ -251,140 +306,163 @@
     }
 
     function drawStructure3DComplex() {
-        disposeGroup(frameGroup); 
+        disposeGroup(frameGroup);
         const s = structureData;
         drawGridAndLabels(s);
         const frameMat = new THREE.MeshLambertMaterial({ color: 0x444444 });
         const nodeMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
 
         for(let n of nodeList) {
-            const px=n.x*s.baySize, py=n.y*s.heightSize, pz=n.z*s.baySize;
             const nm = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), nodeMat);
-            nm.position.set(px,py,pz); frameGroup.add(nm);
-
-            const drawBeam = (tx, ty, tz) => {
-                const v1 = new THREE.Vector3(px, py, pz); const v2 = new THREE.Vector3(tx, ty, tz);
-                const dist = v1.distanceTo(v2);
-                const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, dist, 8), frameMat);
-                cyl.position.copy(v1).add(v2).multiplyScalar(0.5); cyl.lookAt(v2); cyl.rotateX(Math.PI/2);
-                frameGroup.add(cyl);
-            };
-
-            if(n.y>0 && isNodeValid(n.x, n.y-1, n.z)) drawBeam(n.x*s.baySize, (n.y-1)*s.heightSize, n.z*s.baySize);
-            if(n.y>0) {
-                if(isNodeValid(n.x+1, n.y, n.z)) drawBeam((n.x+1)*s.baySize, n.y*s.heightSize, n.z*s.baySize);
-                if(isNodeValid(n.x, n.y, n.z+1)) drawBeam(n.x*s.baySize, n.y*s.heightSize, (n.z+1)*s.baySize);
-            }
+            nm.position.copy(toWorld(n)); frameGroup.add(nm);
             if(n.y===0) {
                 const cone = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.8, 8), new THREE.MeshLambertMaterial({color:0x666666}));
-                cone.position.set(px, py-0.4, pz); frameGroup.add(cone);
+                cone.position.copy(toWorld(n)); cone.position.y -= 0.4; frameGroup.add(cone);
             }
         }
+        for (const [a, b] of frameBars) frameGroup.add(makeRod(a, b, 0.08, frameMat));
         controls.target.set((s.xBays*s.baySize)/2, (s.maxLevel*s.heightSize)/2, (s.zBays*s.baySize)/2);
     }
 
+    // --- Kinematik: Rang der Gleichgewichtsmatrix ---
+    // Jeder Stab liefert eine Zeile (Richtungskosinus an seinen beiden Knoten). Das Stabwerk ist
+    // unverschieblich, wenn der Rang gleich der Anzahl der Freiheitsgrade ist. Stäbe, deren Zeile von
+    // den bisherigen linear abhängig ist, tragen nichts zur Aussteifung bei (überzählig).
+    class RankBasis {
+        constructor(dim) { this.dim = dim; this.rows = []; this.pivots = []; }
+        // Nimmt die Zeile auf, falls sie linear unabhängig ist; gibt zurück, ob das der Fall war
+        add(vec) {
+            const v = Float64Array.from(vec);
+            for (let r = 0; r < this.rows.length; r++) {
+                const f = v[this.pivots[r]];
+                if (f === 0) continue;
+                const row = this.rows[r];
+                for (let j = 0; j < this.dim; j++) v[j] -= f * row[j];
+            }
+            let p = -1, maxAbs = 1e-9;
+            for (let j = 0; j < this.dim; j++) if (Math.abs(v[j]) > maxAbs) { maxAbs = Math.abs(v[j]); p = j; }
+            if (p < 0) return false;
+            const inv = 1 / v[p];
+            for (let j = 0; j < this.dim; j++) v[j] *= inv;
+            this.rows.push(v); this.pivots.push(p);
+            return true;
+        }
+        get rank() { return this.rows.length; }
+    }
+
+    function barRow3D(a, b) {
+        const s = structureData;
+        const d = [(b.x - a.x) * s.baySize, (b.y - a.y) * s.heightSize, (b.z - a.z) * s.baySize];
+        const L = Math.hypot(d[0], d[1], d[2]);
+        const v = new Float64Array(freeDofCount);
+        for (let i = 0; i < 3; i++) {
+            if (a.dof >= 0) v[a.dof + i] -= d[i] / L;
+            if (b.dof >= 0) v[b.dof + i] += d[i] / L;
+        }
+        return v;
+    }
+
+    function frameBasis() {
+        const basis = new RankBasis(freeDofCount);
+        for (const [a, b] of frameBars) basis.add(barRow3D(a, b));
+        return basis;
+    }
+
+    // Verschieblichkeit der Decke Ebene y in ihrer eigenen Ebene (0 = starre Scheibe).
+    // Eine zusammenhängende Scheibe mit n Knoten hat 2n Freiheitsgrade, davon 3 Starrkörperbewegungen.
+    function floorDeficiency(y) {
+        const s = structureData;
+        const nodes = nodeList.filter(n => n.y === y);
+        if (nodes.length < 2) return 0;
+        const idx = new Map(nodes.map((n, i) => [n, 2 * i]));
+        const basis = new RankBasis(2 * nodes.length);
+        const addBar = (a, b) => {
+            const dx = (b.x - a.x) * s.baySize, dz = (b.z - a.z) * s.baySize, L = Math.hypot(dx, dz);
+            const v = new Float64Array(2 * nodes.length);
+            v[idx.get(a)] = -dx / L; v[idx.get(a) + 1] = -dz / L;
+            v[idx.get(b)] = dx / L;  v[idx.get(b) + 1] = dz / L;
+            basis.add(v);
+        };
+        for (const [a, b] of frameBars) if (a.y === y && b.y === y) addBar(a, b);
+        for (const br of userBraces) if (br.type === 'floor' && br.y === y) addBar(br.n1, br.n2);
+        return 2 * nodes.length - 3 - basis.rank;
+    }
+
     // --- 4. Musterlösung ---
+    // Kandidaten werden in didaktisch sinnvoller Reihenfolge angeboten; ein Verband wird nur übernommen,
+    // wenn er das System tatsächlich weiter aussteift. So entsteht immer ein unverschiebliches,
+    // statisch bestimmtes System mit genau p_erf Verbänden.
+    function computeSolution(mode) {
+        const s = structureData;
+        const candidates = [];
+        if (mode === 'scheiben') {
+            // 1. Decken zu starren Scheiben aussteifen
+            for (let y = 1; y <= s.maxLevel; y++)
+                for (let z = 0; z < s.zBays; z++)
+                    for (let x = 0; x < s.xBays; x++)
+                        if (hasFloorField(x, y, z)) candidates.push({ p1: {x, y, z}, p2: {x: x+1, y, z: z+1} });
+            // 2. Je Geschoss Wandscheiben, äußere Achsen zuerst (großer Hebelarm gegen Verdrehen)
+            for (let y = 1; y <= s.maxLevel; y++) candidates.push(...wallCandidates(y, true));
+        } else {
+            // Decke schubweich: jeder Wandabschnitt jeder Reihe wird für sich ausgesteift
+            for (let y = 1; y <= s.maxLevel; y++) candidates.push(...wallCandidates(y, false));
+        }
+
+        const basis = frameBasis();
+        const braces = [];
+        for (const c of candidates) {
+            if (basis.rank === freeDofCount) break;
+            const n1 = getNode(c.p1.x, c.p1.y, c.p1.z), n2 = getNode(c.p2.x, c.p2.y, c.p2.z);
+            if (basis.add(barRow3D(n1, n2))) braces.push(c);
+        }
+        return { braces, complete: basis.rank === freeDofCount };
+    }
+
+    function wallCandidates(y, outerFirst) {
+        const s = structureData;
+        const walls = [];
+        for (let z = 0; z <= s.zBays; z++)
+            for (let x = 0; x < s.xBays; x++)
+                if (hasBeamX(x, y, z)) walls.push({ dir: 'x', line: z, p1: {x, y, z}, p2: {x: x+1, y: y-1, z} });
+        for (let x = 0; x <= s.xBays; x++)
+            for (let z = 0; z < s.zBays; z++)
+                if (hasBeamZ(x, y, z)) walls.push({ dir: 'z', line: x, p1: {x, y, z}, p2: {x, y: y-1, z: z+1} });
+        if (outerFirst) {
+            let cx = 0, cz = 0, cnt = 0;
+            for (let x = 0; x < s.xBays; x++)
+                for (let z = 0; z < s.zBays; z++)
+                    if (hasFloorField(x, y, z)) { cx += x + 0.5; cz += z + 0.5; cnt++; }
+            cx /= cnt; cz /= cnt;
+            const lever = w => w.dir === 'x' ? Math.abs(w.line - cz) : Math.abs(w.line - cx);
+            walls.sort((a, b) => lever(b) - lever(a));
+        }
+        return walls;
+    }
+
+    function drawSolutionBrace(p1, p2) {
+        solutionBraceGroup.add(makeRod(p1, p2, 0.05, new THREE.MeshLambertMaterial({color: 0x198754})));
+        document.querySelectorAll('svg').forEach(svg => {
+            const n1 = svg.querySelector(`circle[data-x="${p1.x}"][data-y="${p1.y}"][data-z="${p1.z}"]`);
+            const n2 = svg.querySelector(`circle[data-x="${p2.x}"][data-y="${p2.y}"][data-z="${p2.z}"]`);
+            if(n1 && n2) {
+                const l = document.createElementNS('http://www.w3.org/2000/svg','line');
+                l.setAttribute('x1',n1.dataset.sx); l.setAttribute('y1',n1.dataset.sy);
+                l.setAttribute('x2',n2.dataset.sx); l.setAttribute('y2',n2.dataset.sy);
+                l.setAttribute('class','solution-brace');
+                svg.querySelector('.usr-l').appendChild(l);
+            }
+        });
+    }
+
     function showSolution() {
-        clearSolution(); 
+        clearSolution();
         disposeGroup(torsionArrowGroup); // Torsionspfeile zurücksetzen
         const mode = document.getElementById('modeSelect').value;
-        const s = structureData;
-        let placedCount = 0;
-
-        const addSol = (x1,y1,z1, x2,y2,z2) => {
-            if(!isNodeValid(x1,y1,z1) || !isNodeValid(x2,y2,z2)) return;
-            const v1 = new THREE.Vector3(x1*s.baySize, y1*s.heightSize, z1*s.baySize);
-            const v2 = new THREE.Vector3(x2*s.baySize, y2*s.heightSize, z2*s.baySize);
-            const dist = v1.distanceTo(v2);
-            const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, dist, 8), new THREE.MeshLambertMaterial({color: 0x198754}));
-            cyl.position.copy(v1).add(v2).multiplyScalar(0.5); cyl.lookAt(v2); cyl.rotateX(Math.PI/2);
-            solutionBraceGroup.add(cyl);
-            document.querySelectorAll('svg').forEach(svg => {
-                const n1 = svg.querySelector(`circle[data-x="${x1}"][data-y="${y1}"][data-z="${z1}"]`);
-                const n2 = svg.querySelector(`circle[data-x="${x2}"][data-y="${y2}"][data-z="${z2}"]`);
-                if(n1 && n2) {
-                    const l = document.createElementNS('http://www.w3.org/2000/svg','line');
-                    l.setAttribute('x1',n1.dataset.sx); l.setAttribute('y1',n1.dataset.sy);
-                    l.setAttribute('x2',n2.dataset.sx); l.setAttribute('y2',n2.dataset.sy);
-                    l.setAttribute('class','solution-brace');
-                    svg.querySelector('.usr-l').appendChild(l);
-                }
-            });
-            placedCount++;
-        };
-
-        if (mode === 'scheiben') {
-            let activeFloors = [];
-            for(let y=1; y<=s.maxLevel; y++) {
-                if (nodeList.some(n => n.y === y)) activeFloors.push(y);
-            }
-
-            // 1. Decke (Starre Scheibe - einheitliche Richtung)
-            for(let y of activeFloors) {
-                let parent = {};
-                function find(i) { if (parent[i] === undefined) parent[i] = i; if (parent[i] !== i) parent[i] = find(parent[i]); return parent[i]; }
-                function union(i, j) { let rI = find(i), rJ = find(j); if (rI !== rJ) { parent[rI] = rJ; return true; } return false; }
-
-                for(let z=0; z<s.zBays; z++) {
-                    for(let x=0; x<s.xBays; x++) {
-                        if (isNodeValid(x,y,z) && isNodeValid(x+1,y,z) && isNodeValid(x,y,z+1) && isNodeValid(x+1,y,z+1)) {
-                            if (union(`X_${x}`, `Z_${z}`)) addSol(x, y, z, x+1, y, z+1);
-                        }
-                    }
-                }
-            }
-
-            // 2. Wandscheiben (Vertikale Verbände - Torsion perfekt verhindern)
-            let unusedWalls = [];
-            for(let y of activeFloors) {
-                let wx = []; let wz = [];
-                for(let z=0; z<=s.zBays; z++) {
-                    for(let x=0; x<s.xBays; x++) { if (isNodeValid(x,y,z) && isNodeValid(x+1,y,z) && isNodeValid(x,y-1,z) && isNodeValid(x+1,y-1,z)) wx.push({x, z, dir:'x'}); }
-                }
-                for(let x=0; x<=s.xBays; x++) {
-                    for(let z=0; z<s.zBays; z++) { if (isNodeValid(x,y,z) && isNodeValid(x,y,z+1) && isNodeValid(x,y-1,z) && isNodeValid(x,y-1,z+1)) wz.push({x, z, dir:'z'}); }
-                }
-
-                let w1 = null, w2 = null, w3 = null;
-                // Wand 1: X-Richtung
-                if (wx.length > 0) { w1 = wx.shift(); addSol(w1.x, y, w1.z, w1.x+1, y-1, w1.z); }
-                // Wand 2: Z-Richtung
-                if (wz.length > 0) { w2 = wz.shift(); addSol(w2.x, y, w2.z, w2.x, y-1, w2.z+1); }
-                
-                // Wand 3: Um Torsion (Schnittpunkt) zu vermeiden, muss zwingend eine Wand platziert werden, deren Koordinaten sich von den bisherigen unterscheiden!
-                let idxX = wx.findIndex(w => w1 && w.z !== w1.z);
-                if (idxX !== -1) { w3 = wx.splice(idxX, 1)[0]; addSol(w3.x, y, w3.z, w3.x+1, y-1, w3.z); } 
-                else {
-                    let idxZ = wz.findIndex(w => w2 && w.x !== w2.x);
-                    if (idxZ !== -1) { w3 = wz.splice(idxZ, 1)[0]; addSol(w3.x, y, w3.z, w3.x, y-1, w3.z+1); }
-                }
-
-                // Falls das Gebäude nur 1 Feld breit ist und keine Wand gefunden wird, eine beliebige verbleibende Wand hinzufügen, um 3 Stück zu erreichen
-                if (!w3) {
-                    if (wx.length > 0) { w3 = wx.shift(); addSol(w3.x, y, w3.z, w3.x+1, y-1, w3.z); }
-                    else if (wz.length > 0) { w3 = wz.shift(); addSol(w3.x, y, w3.z, w3.x, y-1, w3.z+1); }
-                }
-                // Nicht genutzte Wände dieses Geschosses in der Reserve (unused) speichern
-                wx.forEach(w => unusedWalls.push({y, ...w}));
-                wz.forEach(w => unusedWalls.push({y, ...w}));
-            }
-
-            // Nachdem jedes Geschoss 3 Wände erhalten hat, verbleibende Verbände aus der Reserve hinzufügen, bis p_erf exakt erfüllt ist
-            let remaining = perfValue - placedCount;
-            while (remaining > 0 && unusedWalls.length > 0) {
-                let w = unusedWalls.shift();
-                if (w.dir === 'x') addSol(w.x, w.y, w.z, w.x+1, w.y-1, w.z);
-                else addSol(w.x, w.y, w.z, w.x, w.y-1, w.z+1);
-                remaining--;
-            }
-        } else {
-            for(let y=1; y<=s.maxLevel; y++) {
-                for(let z=0; z<=s.zBays; z++) for(let x=0; x<s.xBays; x++) if(isNodeValid(x,y,z)&&isNodeValid(x+1,y,z)) { addSol(x,y,z, x+1,y-1,z); break; }
-                for(let x=0; x<=s.xBays; x++) for(let z=0; z<s.zBays; z++) if(isNodeValid(x,y,z)&&isNodeValid(x,y,z+1)) { addSol(x,y,z, x,y-1,z+1); break; }
-            }
-        }
-        
-        setStatus(mode === 'scheiben' ? `✅ Lösung: Genau ${placedCount} Verbände platziert.` : "Lösung (Reihenstabilisierung) geladen.", "#d1e7dd", "#0f5132");
+        const { braces, complete } = computeSolution(mode);
+        braces.forEach(b => drawSolutionBrace(b.p1, b.p2));
+        if (!complete) return setStatus("⚠️ Für dieses System wurde keine vollständige Lösung gefunden.", "#f8d7da", "#721c24");
+        const name = mode === 'scheiben' ? 'Scheibenstabilisierung' : 'Reihenstabilisierung';
+        setStatus(`✅ Lösung (${name}): ${braces.length} Verbände (p_erf = ${perfValue}), stabil und statisch bestimmt.`, "#d1e7dd", "#0f5132");
     }
 
     // --- NEU: Funktion zum Zeichnen des Torsionsmoment-Pfeils ---
@@ -392,202 +470,145 @@
         disposeGroup(torsionArrowGroup);
         const radius = 2.5; // Radius des Pfeilkreises
         const color = 0xff0000; // Rote Farbe
-        
+
         // Röhre erstellen, die einen 3/4 Kreis (270 Grad) beschreibt
         class ArcCurve extends THREE.Curve {
             getPoint(t, optionalTarget = new THREE.Vector3()) {
-                const angle = t * Math.PI * 1.5; 
+                const angle = t * Math.PI * 1.5;
                 return optionalTarget.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
             }
         }
-        
+
         const tubeGeo = new THREE.TubeGeometry(new ArcCurve(), 64, 0.15, 8, false);
         const mat = new THREE.MeshLambertMaterial({ color: color });
         const tube = new THREE.Mesh(tubeGeo, mat);
-        
+
         // Pfeilspitze (Kegel)
         const coneGeo = new THREE.ConeGeometry(0.4, 1.2, 16);
         const cone = new THREE.Mesh(coneGeo, mat);
-        
+
         // Pfeilspitze bei 270 Grad platzieren und Ausrichtung festlegen
         cone.position.set(0, 0, -radius);
         cone.rotation.x = Math.PI / 2;
         cone.rotation.z = Math.PI / 2;
-        
+
         const arrowGroup = new THREE.Group();
         arrowGroup.add(tube);
         arrowGroup.add(cone);
-        
+
         // Pfeil auf halber Höhe der Stütze am Schnittpunkt platzieren
         arrowGroup.position.set(cx, cy - (structureData.heightSize / 2), cz);
         torsionArrowGroup.add(arrowGroup);
     }
 
     // --- 5. System prüfen ---
+    // Scheibenstabilisierung: jede Decke ist eine starre Scheibe und wird je Geschoss von mindestens
+    // drei Wandscheiben gehalten, die weder alle parallel sind noch sich alle in einem Punkt schneiden.
+    function checkScheibenConcept() {
+        const s = structureData;
+        for (let y = 1; y <= s.maxLevel; y++) {
+            if (!nodeList.some(n => n.y === y)) continue;
+            const def = floorDeficiency(y);
+            if (def > 0) return `❌ Fehler: Decke Ebene ${y} ist keine starre Scheibe (${def}-fach verschieblich in ihrer Ebene) – Horizontalverbände fehlen oder sind wirkungslos angeordnet!`;
+        }
+        for (let y = 1; y <= s.maxLevel; y++) {
+            if (!nodeList.some(n => n.y === y)) continue;
+            const where = `Geschoss unter Ebene ${y}`;
+            const walls = userBraces.filter(b => (b.type === 'wallX' || b.type === 'wallZ') && b.y === y);
+            const linesZ_of_X = new Set(walls.filter(b => b.type === 'wallX').map(b => b.z)); // Achsen der X-Wände
+            const linesX_of_Z = new Set(walls.filter(b => b.type === 'wallZ').map(b => b.x)); // Achsen der Z-Wände
+            if (walls.length === 0) return `❌ Fehler: ${where} hat keine Wandscheiben (Vertikalverbände) – die Decke kann seitlich ausweichen!`;
+            if (linesX_of_Z.size === 0) return `❌ Fehler (Parallelität): ${where} ist instabil gegen Z-Kräfte! (Nur X-Verbände)`;
+            if (linesZ_of_X.size === 0) return `❌ Fehler (Parallelität): ${where} ist instabil gegen X-Kräfte! (Nur Z-Verbände)`;
+            // Genau eine X-Achse und eine Z-Achse: alle Wirkungslinien schneiden sich in einem Punkt
+            if (linesZ_of_X.size === 1 && linesX_of_Z.size === 1) {
+                const errX = [...linesX_of_Z][0], errZ = [...linesZ_of_X][0];
+                showTorsionArrow(errX * s.baySize, y * s.heightSize, errZ * s.baySize);
+                return `❌ Fehler (Torsion): Im ${where} schneiden sich alle Verbände in der Achse (Reihe ${ABC[errX]} / Reihe ${errZ+1}). Das System verdreht sich!`;
+            }
+        }
+        return null;
+    }
+
+    // Zusammenhängende Abschnitte [von, bis] der Felder 0..n-1, für die pred gilt
+    function runs(n, pred) {
+        const out = []; let start = -1;
+        for (let i = 0; i <= n; i++) {
+            if (i < n && pred(i)) { if (start < 0) start = i; }
+            else if (start >= 0) { out.push([start, i-1]); start = -1; }
+        }
+        return out;
+    }
+
+    // Reihenstabilisierung: Decke schubweich, jede Reihe ist ein ebenes Gelenkstabwerk und braucht
+    // in jedem Geschoss und in jedem zusammenhängenden Wandabschnitt einen eigenen Verband.
+    function checkReihenConcept() {
+        const s = structureData;
+        if (userBraces.some(b => b.type === 'floor')) return `❌ Fehler: Bei Reihenstabilisierung muss die Decke schubweich sein!`;
+        for (let y = 1; y <= s.maxLevel; y++) {
+            for (let z = 0; z <= s.zBays; z++) {
+                const segs = runs(s.xBays, x => hasBeamX(x, y, z));
+                for (const [a, b] of segs) {
+                    if (userBraces.some(br => br.type === 'wallX' && br.y === y && br.z === z && br.x >= a && br.x <= b)) continue;
+                    const part = segs.length > 1 ? ` im Abschnitt ${ABC[a]}–${ABC[b+1]}` : '';
+                    return `❌ Fehler: In Reihe ${z + 1} (Ebene ${y})${part} fehlt ein Verband!`;
+                }
+            }
+            for (let x = 0; x <= s.xBays; x++) {
+                const segs = runs(s.zBays, z => hasBeamZ(x, y, z));
+                for (const [a, b] of segs) {
+                    if (userBraces.some(br => br.type === 'wallZ' && br.y === y && br.x === x && br.z >= a && br.z <= b)) continue;
+                    const part = segs.length > 1 ? ` im Abschnitt ${a+1}–${b+2}` : '';
+                    return `❌ Fehler: In Reihe ${ABC[x]} (Ebene ${y})${part} fehlt ein Verband!`;
+                }
+            }
+        }
+        return null;
+    }
+
+    function markRedundant(list) {
+        for (const b of userBraces) {
+            const r = list.includes(b);
+            b.svg.classList.toggle('redundant', r);
+            b.mesh.material.color.set(r ? 0xfd7e14 : 0xdc3545);
+        }
+    }
+
     function analyzeStructure() {
         const mode = document.getElementById('modeSelect').value;
-        const s = structureData;
         const sb = document.getElementById('status-bar');
         sb.style.opacity = '0.5'; setTimeout(() => sb.style.opacity = '1', 100);
 
         disposeGroup(torsionArrowGroup); // Vorhandene Pfeile bei Prüfungsstart entfernen
+        markRedundant([]);
 
-        let conceptualError = null;
-
-        if (mode === 'scheiben') {
-            for (let y = 1; y <= s.maxLevel; y++) {
-                if (nodeList.some(n => n.y === y)) {
-                    let br = userBraces.filter(b => b.p1.y === y && b.p2.y === y).length;
-                    if (br === 0) { conceptualError = `❌ Fehler: Decke Ebene ${y} ist schubweich! (Horizontale Verbände fehlen)`; break; }
-
-                    // Prüfung auf Torsion & Parallelität
-                    let xBraces = 0, zBraces = 0;
-                    let verticalBraces = userBraces.filter(b => (b.p1.y === y && b.p2.y === y - 1) || (b.p1.y === y - 1 && b.p2.y === y));
-                    
-                    let uniqueZ_of_X = new Set();
-                    let uniqueX_of_Z = new Set();
-                    
-                    for (let b of verticalBraces) {
-                        if (b.p1.z === b.p2.z) { xBraces++; uniqueZ_of_X.add(b.p1.z); } // Wand in X-Richtung
-                        if (b.p1.x === b.p2.x) { zBraces++; uniqueX_of_Z.add(b.p1.x); } // Wand in Z-Richtung
-                    }
-
-                    if (verticalBraces.length > 0) {
-                        // Parallelitätsfehler (Verbände nur in eine Richtung installiert)
-                        if (xBraces > 0 && zBraces === 0) { conceptualError = `❌ Fehler (Parallelität): Ebene ${y} ist instabil gegen Z-Kräfte! (Nur X-Verbände)`; break; }
-                        if (zBraces > 0 && xBraces === 0) { conceptualError = `❌ Fehler (Parallelität): Ebene ${y} ist instabil gegen X-Kräfte! (Nur Z-Verbände)`; break; }
-                        
-                        // Prüfung auf Torsionsfehler: Finde den einzigen Schnittpunkt auf der X- und Z-Achse
-                        if (uniqueZ_of_X.size === 1 && uniqueX_of_Z.size === 1) {
-                            let errX = Array.from(uniqueX_of_Z)[0];
-                            let errZ = Array.from(uniqueZ_of_X)[0];
-                            const abc = "ABCDEFGHIJ";
-                            conceptualError = `❌ Fehler (Torsion): Auf Ebene ${y} schneiden sich alle Verbände in der Achse (Reihe ${abc[errX]} / Reihe ${errZ+1}). Das System verdreht sich!`;
-                            
-                            // Torsionspfeil erstellen (an der Koordinate des Schnittpunkts)
-                            showTorsionArrow(errX * s.baySize, y * s.heightSize, errZ * s.baySize);
-                            break;
-                        }
-                    }
-                }
-            }
-        } else if (mode === 'reihen') {
-            if (userBraces.some(b => b.p1.y === b.p2.y)) {
-                conceptualError = `❌ Fehler: Bei Reihenstabilisierung muss die Decke schubweich sein!`;
-            } else {
-                for (let y = 1; y <= s.maxLevel; y++) {
-                    for (let z = 0; z <= s.zBays; z++) {
-                        let hasWall = false;
-                        for (let x = 0; x <= s.xBays; x++) { if (isNodeValid(x, y, z) && isNodeValid(x, y - 1, z)) { hasWall = true; break; } }
-                        if (hasWall) {
-                            let hasBrace = userBraces.some(b => b.p1.z === z && b.p2.z === z && ((b.p1.y === y && b.p2.y === y - 1) || (b.p1.y === y - 1 && b.p2.y === y)));
-                            if (!hasBrace) { conceptualError = `❌ Fehler: In Reihe ${z + 1} (Ebene ${y}) fehlt ein Verband!`; break; }
-                        }
-                    }
-                    if (conceptualError) break;
-
-                    const abc = "ABCDEFGHIJ";
-                    for (let x = 0; x <= s.xBays; x++) {
-                        let hasWall = false;
-                        for (let z = 0; z <= s.zBays; z++) { if (isNodeValid(x, y, z) && isNodeValid(x, y - 1, z)) { hasWall = true; break; } }
-                        if (hasWall) {
-                            let hasBrace = userBraces.some(b => b.p1.x === x && b.p2.x === x && ((b.p1.y === y && b.p2.y === y - 1) || (b.p1.y === y - 1 && b.p2.y === y)));
-                            if (!hasBrace) { conceptualError = `❌ Fehler: In Reihe ${abc[x]} (Ebene ${y}) fehlt ein Verband!`; break; }
-                        }
-                    }
-                    if (conceptualError) break;
-                }
-            }
-        }
-
+        const conceptualError = mode === 'scheiben' ? checkScheibenConcept() : checkReihenConcept();
         if (conceptualError) return setStatus(conceptualError, "#f8d7da", "#721c24");
 
-        // FEM Berechnung
-        const nDOF = nodeList.length * 3; 
-        let K = new Float64Array(nDOF * nDOF); 
-        function kSet(r, c, v) { if(r<nDOF && c<nDOF) K[r*nDOF + c] += v; }
+        const basis = frameBasis();
+        const redundant = userBraces.filter(b => !basis.add(barRow3D(b.n1, b.n2)));
+        const f = freeDofCount - basis.rank; // Grad der kinematischen Verschieblichkeit
+        const p = userBraces.length;
+        markRedundant(redundant);
 
-        let elements = [];
-        for(let n of nodeList) {
-            if(n.y > 0 && isNodeValid(n.x, n.y-1, n.z)) elements.push([n, nodeList.find(nn=>nn.x===n.x && nn.y===n.y-1 && nn.z===n.z)]);
-            if(n.y > 0) {
-                if(isNodeValid(n.x+1, n.y, n.z)) elements.push([n, nodeList.find(nn=>nn.x===n.x+1 && nn.y===n.y && nn.z===n.z)]);
-                if(isNodeValid(n.x, n.y, n.z+1)) elements.push([n, nodeList.find(nn=>nn.x===n.x && nn.y===n.y && nn.z===n.z+1)]);
-            }
+        if (f > 0) {
+            let msg = `❌ Einsturzgefahr! System ist ${f}-fach kinematisch verschieblich.`;
+            if (redundant.length > 0) msg += ` ${redundant.length} Verband/Verbände wirken nicht (orange markiert) – p = p_erf allein reicht nicht!`;
+            return setStatus(msg, "#f8d7da", "#721c24");
         }
-        for(let b of userBraces) {
-            let n1 = nodeList.find(n => n.x===b.p1.x && n.y===b.p1.y && n.z===b.p1.z);
-            let n2 = nodeList.find(n => n.x===b.p2.x && n.y===b.p2.y && n.z===b.p2.z);
-            if(n1 && n2) elements.push([n1, n2]);
-        }
-
-        for(let el of elements) {
-            let dx = (el[1].x - el[0].x) * s.baySize, dy = (el[1].y - el[0].y) * s.heightSize, dz = (el[1].z - el[0].z) * s.baySize;
-            let L = Math.sqrt(dx*dx + dy*dy + dz*dz);
-            if(L===0) continue;
-            let T = [dx/L, dy/L, dz/L];
-            for(let i=0; i<3; i++) {
-                for(let j=0; j<3; j++) {
-                    let v = 1000 * T[i] * T[j];
-                    kSet(el[0].id*3+i, el[0].id*3+j, v); kSet(el[0].id*3+i, el[1].id*3+j, -v); 
-                    kSet(el[1].id*3+i, el[0].id*3+j, -v); kSet(el[1].id*3+i, el[1].id*3+j, v);
-                }
-            }
-        }
-
-        for(let n of nodeList) {
-            if(n.y === 0) {
-                let idx = n.id * 3;
-                kSet(idx, idx, 1e15); kSet(idx+1, idx+1, 1e15); kSet(idx+2, idx+2, 1e15);
-            }
-        }
-
-        let F = new Float64Array(nDOF);
-        for(let n of nodeList) { if(n.y > 0 && n.y === getBayHeight(n.x, n.z)) { F[n.id*3] = 20; F[n.id*3+2] = 10; } }
-
-        // Gaußsches Eliminationsverfahren
-        let M = new Float64Array(K); let x = new Float64Array(F);
-        let stable = true;
-        for(let k=0; k<nDOF; k++) {
-            let maxVal = Math.abs(M[k*nDOF + k]), maxRow = k;
-            for(let i=k+1; i<nDOF; i++) if(Math.abs(M[i*nDOF + k]) > maxVal) { maxVal = Math.abs(M[i*nDOF + k]); maxRow = i; }
-            if(maxVal < 1e-9) { stable = false; break; } 
-            for(let j=k; j<nDOF; j++) { let t = M[k*nDOF + j]; M[k*nDOF + j] = M[maxRow*nDOF + j]; M[maxRow*nDOF + j] = t; }
-            let tB = x[k]; x[k] = x[maxRow]; x[maxRow] = tB;
-            for(let i=k+1; i<nDOF; i++) {
-                let f = M[i*nDOF + k] / M[k*nDOF + k];
-                for(let j=k; j<nDOF; j++) M[i*nDOF + j] -= f * M[k*nDOF + j];
-                x[i] -= f * x[k];
-            }
-        }
-        
-        if (!stable) return setStatus("❌ Einsturzgefahr! (Strukturell instabil / Singular Matrix)", "#f8d7da", "#721c24");
-
-        for(let i=nDOF-1; i>=0; i--) {
-            let sum = 0; for(let j=i+1; j<nDOF; j++) sum += M[i*nDOF + j] * x[j];
-            x[i] = (x[i] - sum) / M[i*nDOF + i];
-        }
-
-        let maxDisp = 0; for(let val of x) maxDisp = Math.max(maxDisp, Math.abs(val));
-        if(maxDisp > 1e4) return setStatus(`❌ Einsturzgefahr! (Zu große Verformung)`, "#f8d7da", "#721c24");
-
-        if (mode === 'scheiben') {
-            if (userBraces.length > perfValue) return setStatus(`⚠️ Stabil, aber überbestimmt! (${userBraces.length} von p_erf=${perfValue})`, "#cfe2ff", "#084298");
-            if (userBraces.length < perfValue) return setStatus(`❌ Fehler: p_erf (${perfValue}) nicht erreicht!`, "#f8d7da", "#721c24");
-        }
-        
-        setStatus(`✅ System ist absolut perfekt! (p_erf eingehalten)`, "#d1e7dd", "#0f5132");
+        if (redundant.length > 0) return setStatus(`⚠️ Stabil, aber ${redundant.length}-fach statisch unbestimmt (p = ${p} > p_erf = ${perfValue}). Überzählige Verbände z. B. orange markiert.`, "#cfe2ff", "#084298");
+        setStatus(`✅ System ist stabil und statisch bestimmt! (p = p_erf = ${perfValue})`, "#d1e7dd", "#0f5132");
     }
 
     function create2DPanelsComplex() {
         const c = document.getElementById('draw-area');
-        const s = structureData; const sc = 25; 
+        const s = structureData; const sc = 25;
         let h = '';
         try {
             h += `<div class="panel-group"><span class="panel-title">Reihen (Z-Ansichten)</span><div class="svg-container">`;
             for(let z=0; z<=s.zBays; z++) h += makeSVG(`z-view-${z}`, `Reihe ${z+1}`, s.xBays, s.maxLevel, sc, 'z', z);
             h += `</div></div><div class="panel-group"><span class="panel-title">Reihen (X-Ansichten)</span><div class="svg-container">`;
-            for(let x=0; x<=s.xBays; x++) h += makeSVG(`x-view-${x}`, `Reihe ${"ABCDEFGHIJ"[x]}`, s.zBays, s.maxLevel, sc, 'x', x);
+            for(let x=0; x<=s.xBays; x++) h += makeSVG(`x-view-${x}`, `Reihe ${ABC[x]}`, s.zBays, s.maxLevel, sc, 'x', x);
             h += `</div></div><div class="panel-group"><span class="panel-title">Decken (Draufsichten)</span><div class="svg-container">`;
             for(let y=1; y<=s.maxLevel; y++) h += makeSVG(`y-view-${y}`, `Ebene ${y}`, s.xBays, s.zBays, sc, 'y', y);
             h += `</div></div>`;
@@ -597,26 +618,27 @@
     }
 
     function makeSVG(id, title, c, r, sc, axis, idx) {
-        let lines = '', nodes = '';
+        let fields = '', lines = '', nodes = '';
         for(let i=0; i<=r; i++) {
             for(let j=0; j<=c; j++) {
                 let x3,y3,z3;
                 if(axis==='z') { x3=j; y3=r-i; z3=idx; } if(axis==='x') { x3=idx; y3=r-i; z3=j; } if(axis==='y') { x3=j; y3=idx; z3=i; }
+                if(axis==='y' && i<r && j<c && hasFloorField(x3, y3, z3)) fields+=`<rect x="${20+j*sc}" y="${20+i*sc}" width="${sc}" height="${sc}" class="field"/>`;
                 if(!isNodeValid(x3, y3, z3)) continue;
-                if(axis!=='y' && j<c && isNodeValid(x3+(axis==='z'?1:0), y3, z3+(axis==='x'?1:0))) lines+=`<line x1="${20+j*sc}" y1="${20+i*sc}" x2="${20+(j+1)*sc}" y2="${20+i*sc}" class="frame"/>`;
-                if(axis!=='y' && i<r && isNodeValid(x3, y3-1, z3)) lines+=`<line x1="${20+j*sc}" y1="${20+i*sc}" x2="${20+j*sc}" y2="${20+(i+1)*sc}" class="frame"/>`;
-                if(axis==='y' && j<c && isNodeValid(x3+1, y3, z3)) lines+=`<line x1="${20+j*sc}" y1="${20+i*sc}" x2="${20+(j+1)*sc}" y2="${20+i*sc}" class="frame"/>`;
-                if(axis==='y' && i<r && isNodeValid(x3, y3, z3+1)) lines+=`<line x1="${20+j*sc}" y1="${20+i*sc}" x2="${20+j*sc}" y2="${20+(i+1)*sc}" class="frame"/>`;
+                const hasH = axis==='x' ? hasBeamZ(x3, y3, z3) : hasBeamX(x3, y3, z3);  // Stab nach rechts
+                const hasV = axis==='y' ? hasBeamZ(x3, y3, z3) : y3 > 0;                // Stab nach unten (Riegel bzw. Stütze)
+                if(j<c && hasH) lines+=`<line x1="${20+j*sc}" y1="${20+i*sc}" x2="${20+(j+1)*sc}" y2="${20+i*sc}" class="frame"/>`;
+                if(i<r && hasV) lines+=`<line x1="${20+j*sc}" y1="${20+i*sc}" x2="${20+j*sc}" y2="${20+(i+1)*sc}" class="frame"/>`;
                 const cls = (y3===0) ? 'node ground' : 'node';
                 nodes += `<circle cx="${20+j*sc}" cy="${20+i*sc}" r="4" class="${cls}" data-x="${x3}" data-y="${y3}" data-z="${z3}" data-sx="${20+j*sc}" data-sy="${20+i*sc}"></circle>`;
             }
         }
-        return `<div class="svg-wrapper"><div style="font-size:13px;margin-bottom:5px;">${title}</div><svg id="${id}" width="${c*sc+40}" height="${r*sc+40}"><g class="usr-l"></g>${lines}${nodes}</svg></div>`;
+        return `<div class="svg-wrapper"><div style="font-size:13px;margin-bottom:5px;">${title}</div><svg id="${id}" width="${c*sc+40}" height="${r*sc+40}">${fields}<g class="usr-l"></g>${lines}${nodes}</svg></div>`;
     }
 
     function onNodeClick(e) {
         const t = e.target;
-        if(!selectedNode) { selectedNode = t; t.classList.add('selected'); } 
+        if(!selectedNode) { selectedNode = t; t.classList.add('selected'); }
         else {
             if(selectedNode.closest('svg') !== t.closest('svg')) { alert("Verbindung nur im selben Fenster."); selectedNode.classList.remove('selected'); selectedNode=null; return; }
             if(selectedNode !== t) addBrace(selectedNode, t);
@@ -624,19 +646,32 @@
         }
     }
 
+    // Ein Verband ist die Diagonale genau eines vorhandenen Feldes: Deckenfeld oder Wandfeld (X- bzw. Z-Wand)
+    function classifyBrace(p1, p2) {
+        const dx = Math.abs(p1.x - p2.x), dy = Math.abs(p1.y - p2.y), dz = Math.abs(p1.z - p2.z);
+        const x = Math.min(p1.x, p2.x), y = Math.max(p1.y, p2.y), z = Math.min(p1.z, p2.z);
+        if (dy === 0 && dx === 1 && dz === 1 && hasFloorField(x, y, z)) return { type: 'floor', x, y, z };
+        if (dy === 1 && dx === 1 && dz === 0 && hasBeamX(x, y, z)) return { type: 'wallX', x, y, z };
+        if (dy === 1 && dx === 0 && dz === 1 && hasBeamZ(x, y, z)) return { type: 'wallZ', x, y, z };
+        return null;
+    }
+
+    function samePoint(a, b) { return a.x === b.x && a.y === b.y && a.z === b.z; }
+
     function addBrace(n1, n2) {
         const p1 = {x:parseInt(n1.dataset.x), y:parseInt(n1.dataset.y), z:parseInt(n1.dataset.z)};
         const p2 = {x:parseInt(n2.dataset.x), y:parseInt(n2.dataset.y), z:parseInt(n2.dataset.z)};
-        let braceData = { p1, p2, svg: null, mesh: null };
+        const info = classifyBrace(p1, p2);
+        if (!info) return setStatus("⚠️ Ein Verband muss die Diagonale eines vorhandenen Decken- oder Wandfeldes sein.", "#fff3cd", "#333");
+        if (userBraces.some(b => (samePoint(b.p1, p1) && samePoint(b.p2, p2)) || (samePoint(b.p1, p2) && samePoint(b.p2, p1))))
+            return setStatus("⚠️ Dieser Verband ist bereits vorhanden.", "#fff3cd", "#333");
+        let braceData = { p1, p2, n1: getNode(p1.x, p1.y, p1.z), n2: getNode(p2.x, p2.y, p2.z), ...info, svg: null, mesh: null };
         userBraces.push(braceData);
         const l = document.createElementNS('http://www.w3.org/2000/svg','line');
         l.setAttribute('x1', n1.dataset.sx); l.setAttribute('y1', n1.dataset.sy); l.setAttribute('x2', n2.dataset.sx); l.setAttribute('y2', n2.dataset.sy); l.setAttribute('class','brace');
         l.addEventListener('click', (e) => { e.stopPropagation(); if(confirm('Stab entfernen?')) removeBrace(braceData); });
         n1.closest('svg').querySelector('.usr-l').appendChild(l); braceData.svg = l;
-        const s = structureData;
-        const v1 = new THREE.Vector3(p1.x*s.baySize, p1.y*s.heightSize, p1.z*s.baySize); const v2 = new THREE.Vector3(p2.x*s.baySize, p2.y*s.heightSize, p2.z*s.baySize);
-        const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,v1.distanceTo(v2),8), new THREE.MeshLambertMaterial({color:0xdc3545}));
-        cyl.position.copy(v1).add(v2).multiplyScalar(0.5); cyl.lookAt(v2); cyl.rotateX(Math.PI/2);
+        const cyl = makeRod(p1, p2, 0.08, new THREE.MeshLambertMaterial({color:0xdc3545}));
         userBraceGroup.add(cyl); braceData.mesh = cyl;
     }
 
